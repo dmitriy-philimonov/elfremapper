@@ -1,0 +1,4 @@
+ELFREMAPPER_1.0 {
+  global: remap_text_and_data_to_huge_pages;
+  local: *;
+};

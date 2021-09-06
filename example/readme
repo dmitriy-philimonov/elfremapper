@@ -1,0 +1,13 @@
+Examples with GCC 10.3.0 and GNU ld.bfd. Running on Ubuntu 20.04 LTS (with ASLR turned on).
+
+Make default 4K alignment for LOAD segments (4 segments):
+$ g++ -g -O2 -Wall main.cc -o tst -lelfremapper
+
+Make 2M alignment for LOAD segments (2 segments):
+$ g++ -g -O2 -Wall main.cc -o tst -lelfremapper -Wl,-zcommon-page-size=0x200000 -Wl,-zmax-page-size=0x200000 -Wl,-znoseparate-code
+
+Make 2M alignment for LOAD segments (4 segments):
+$ g++ -g -O2 -Wall main.cc -o tst -lelfremapper -Wl,-zcommon-page-size=0x200000 -Wl,-zmax-page-size=0x200000
+
+Install libelfremapper.so.1 to the /usr/local/lib (default), then run:
+$ LD_LIBRARY_PATH=/usr/local/lib ./tst
