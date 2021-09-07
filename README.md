@@ -16,6 +16,9 @@ However, libhugetlbfs has several major drawbacks:
 5. It requires a proper managed hugetlbfs mount point (due to the backward compatibility with older kernels)
 6. It requires LOAD segments aligned to a huge page size (e.g.compiled with common-page-size=2M max-page-size=2M)
 
+# Performance
+
+Performance improves significantly for CPU-bound applications with big text/data sections (much more than 2 MB).  The technique was tested on MySQL server (https://github.com/mysql/mysql-server) in Cloud environment. The server consumes about 40-50 large pages (~100 MB). The CPU bound scenarious become faster up to 10% in sysbench OLTP PS/RO (especially for very small x86_64 cloud instances with 1 vCPU and 2 GB RAM). Speedup on AArch64 CPUs is usually much better, however it should be tested in each particular case.
 
 # Implementation
 
@@ -43,6 +46,14 @@ Limitations:
 2. /proc filesystem is needed
 3. Support is provided only for Linux systems (tested for kernels >= 5.4, GCC 10.3.0)
 4. The default symbol resolution stops working for "perf" with unstripped ELF files. The workaround is to use perf JIT API (see below)
+
+# Build options
+
+The library could be built in two ways:
+* With published API (default): a user must call the API manually from his application.
+* Without API (using cmake option `MAKE_LD_PRELOAD_LIBRARY`): as it stands, the functionality is called automatically during the library load, and the main usage is via `LD_PRELOAD` or an application may just link against the library and doesn't do anything else.
+
+The second option might be convenient for the testing/benchmarking purposes, e.g. you want to try the library with your application and you don't want to recompile it.
 
 # Maintenance
 
