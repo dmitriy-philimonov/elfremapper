@@ -1,7 +1,6 @@
 #include <alloca.h>
 #include <errno.h>
 #include <stdarg.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,7 +83,7 @@ TLogger::THook TLogger::LoggerHook = nullptr;
 #define PRINT_ERROR_ERRNO(FORMAT, ...)                                         \
   PRINT_ERROR_ERRNO_IMPL(errno, FORMAT, ##__VA_ARGS__)
 
-#if VERBOSE_LEVEL == 1
+#if VERBOSE_LEVEL >= 1
 #define DEBUG(...) LOG_PRINTER(__VA_ARGS__)
 #else
 #define DEBUG(...)
@@ -100,7 +99,7 @@ static inline size_t AlignMeUp(size_t addr) {
 
 struct TStringBuf {
   void Split(TStringBuf *cols, size_t count) const {
-    uint32_t coll = 0;
+    size_t coll = 0;
     char *line = Data, *const end = Data + Len;
     for (char *start = line; start < end && coll < count; ++start) {
       if (*start != ' ')
@@ -164,6 +163,7 @@ public:
 
   operator bool() const noexcept { return IsOk(); }
 
+  /* Returns null-terminated string with calculated length (without '\0') */
   bool Read(TStringBuf &out) {
     while (ssize_t read = getline(&Line, &Len, Input)) {
       if (read == -1) {
@@ -171,7 +171,8 @@ public:
         return false;
       }
       if (Line[read - 1] == '\n')
-        --read;
+        Line[--read] = '\0';
+
       out.Len = read;
       out.Data = Line;
       return true;
@@ -224,9 +225,14 @@ struct TMapRegion {
 };
 
 class TRemapper {
+  static constexpr size_t EMPTY = (size_t)(-1);
+
 private:
   std::vector<TMapRegion> Regions;
-  std::vector<uint32_t> Exe;
+
+  /* Assumption: LOAD segments go one after another in one bunch */
+  size_t ExeFirst = 0;
+  size_t ExeLast = EMPTY;
 
 private:
   bool ReadSelfMaps() noexcept {
@@ -286,40 +292,39 @@ private:
 
       TStringBuf &pathname = columns[PATHNAME];
       if (pathname == exe) {
-        DEBUG("Found load: [%#lx, %#lx)", reg.AddressStart, reg.AddressStop);
+        DEBUG("Found load: [%#lx, %#lx) size: %#lx", reg.AddressStart, reg.AddressStop, reg.AddressStop - reg.AddressStart);
         if (reg.AddressStartAligned <= localPC &&
             localPC <= reg.AddressStopAligned) {
           PRINT_ERROR(
               "ElfRemapper source code overlaps with aligned LOAD segment: "
               "%#lx inside [%#lx, %#lx). You MUST use ElfRemapper as DSO.",
               localPC, reg.AddressStartAligned, reg.AddressStopAligned);
-          Exe.clear();
+          ExeLast = EMPTY;
           return false;
         }
-        Exe.push_back(Regions.size());
+        if (ExeLast == EMPTY)
+          ExeFirst = ExeLast = Regions.size();
+        else
+          ExeLast = Regions.size();
       }
 
       Regions.push_back(reg);
     }
-    return true;
+    return ExeLast != EMPTY;
   }
 
   void FindHeap() {
-    /* Make sure no heap allocations are done after this line */
-    Exe.reserve(Exe.size() + 1);
-
     /* We check only one segment next to the .bss */
     size_t brk = (size_t)sbrk(0);
-    size_t last = Exe.back();
 
     /* no heap at all ? */
-    if (brk <= Regions[last].AddressStop) {
+    if (brk <= Regions[ExeLast].AddressStop) {
       DEBUG("No heap found");
       return;
     }
 
     /* find heap segment and add it to the load segments */
-    for (size_t next = last + 1; next < Regions.size(); ++next) {
+    for (size_t next = ExeLast + 1; next < Regions.size(); ++next) {
       TMapRegion &reg = Regions[next];
       if (brk == reg.AddressStop) {
         /* Add only overlapping heap segment:
@@ -327,10 +332,10 @@ private:
            - if dynamic loader is used to start application - heap is
              attached to the dynamic loader LOAD segments (too far).
         */
-        if (reg.AddressStartAligned < Regions[last].AddressStopAligned) {
+        if (reg.AddressStartAligned < Regions[ExeLast].AddressStopAligned) {
           DEBUG("Found overlapping heap: [0x%lx, 0x%lx)", reg.AddressStart,
                 reg.AddressStop);
-          Exe.push_back(next);
+          ExeLast = next;
           reg.Flags |= TMapRegion::HEAP;
         }
         break;
@@ -340,16 +345,19 @@ private:
 
 public:
   TRemapper() {
-    if (ReadSelfMaps()) {
-      FindHeap();
-      DEBUG("Loaded %lu sections, remapping %lu", Regions.size(), Exe.size());
+    if (!ReadSelfMaps()) {
+      DEBUG("Loaded %lu sections, no sections for remapping found", Regions.size());
+      return;
     }
+
+    FindHeap();
+    DEBUG("Loaded %lu sections, remapping %lu", Regions.size(), ExeLast - ExeFirst + 1);
   }
 
-  operator bool() const noexcept { return !Exe.empty(); }
+  operator bool() const noexcept { return ExeLast != EMPTY; }
 
-  uint32_t DoRemap(size_t beg, size_t end, size_t addrBeg, size_t addrEnd,
-                   size_t perm) const noexcept {
+  size_t DoRemap(size_t beg, size_t end, size_t addrBeg, size_t addrEnd,
+                 size_t perm) const noexcept {
 
     /* Idea is pretty simple:
        - move LOAD segments to the different addresses using mremap
@@ -558,29 +566,28 @@ public:
     return hugeSize;
   }
 
-  uint32_t Remap() const noexcept {
-    if (Exe.empty())
+  size_t Remap() const noexcept {
+    if (ExeLast == EMPTY)
       return 0;
 
     /* Check that previous mapping doesn't overlap with the first 'Exe' segment.
        Usually the very first mapping is the LOAD segment (.text): first == 0,
        so it should not happen.
     */
-    uint32_t first = Exe.front();
-    if (first != 0 && Regions[first - 1].AddressStopAligned >
-                          Regions[first].AddressStartAligned) {
+    if (ExeFirst != 0 && Regions[ExeFirst - 1].AddressStopAligned >
+                          Regions[ExeFirst].AddressStartAligned) {
       PRINT_ERROR("First LOAD segments overlaps with previous mapping "
                   "prev=[0x%lx, 0x%lx), first=[0x%lx, 0x%lx)",
-                  Regions[first - 1].AddressStart,
-                  Regions[first - 1].AddressStop, Regions[first].AddressStart,
-                  Regions[first].AddressStop);
+                  Regions[ExeFirst - 1].AddressStart,
+                  Regions[ExeFirst - 1].AddressStop, Regions[ExeFirst].AddressStart,
+                  Regions[ExeFirst].AddressStop);
       return 0;
     }
 
-    size_t idx = 0, total = 0;
-    while (idx < Exe.size()) {
+    size_t idx = ExeFirst, total = 0;
+    while (idx <= ExeLast) {
       size_t beg = idx, end = idx;
-      const TMapRegion &reg = Regions[Exe[idx++]];
+      const TMapRegion &reg = Regions[idx++];
 
       size_t addrBeg = reg.AddressStartAligned;
       size_t addrEnd = reg.AddressStopAligned;
@@ -588,8 +595,9 @@ public:
       DEBUG("Remapping [%#lx %#lx) -> [%#lx %#lx)", reg.AddressStart,
             reg.AddressStop, addrBeg, addrEnd);
 
-      while (idx < Exe.size()) {
-        const TMapRegion &curr = Regions[Exe[idx]];
+      /* Overlapping might come over ExeLast */
+      while (idx < Regions.size()) {
+        const TMapRegion &curr = Regions[idx];
         if (addrEnd <= curr.AddressStartAligned)
           break;
 
@@ -605,24 +613,36 @@ public:
   }
 
   void DebugPrint() const noexcept {
-    uint32_t exe = 0;
-    for (uint32_t idx = 0; idx < Regions.size(); ++idx) {
+    for (size_t idx = 0; idx < Regions.size(); ++idx) {
       const TMapRegion &reg = Regions[idx];
-      LOG_PRINTER("%u [0x%lx, 0x%lx) [%lu]", idx, reg.AddressStart,
+      LOG_PRINTER("%lu [0x%lx, 0x%lx) [%lu]", idx, reg.AddressStart,
                   reg.AddressStop, reg.Flags);
-      if (exe < Exe.size() && Exe[exe] == idx) {
+      if (ExeFirst <= idx && idx <= ExeLast)
         LOG_PRINTER(" [LOAD]");
-        ++exe;
-      }
       LOG_PRINTER("\n");
     }
   }
 };
 
+void PrintSelfMaps() {
+#if VERBOSE_LEVEL >= 2
+	TFileReader reader("/proc/self/maps");
+	TStringBuf line;
+	while(reader.Read(line)) {
+		fprintf(stderr, "%s\n", line.Data);
+	}
+#endif
+}
+
 size_t RemapMe(void (*logger)(const char *)) {
+  PrintSelfMaps();
+
   TLogger log(logger);
   TRemapper remapper;
-  return remapper.Remap();
+  size_t total = remapper.Remap();
+
+  PrintSelfMaps();
+  return total;
 }
 
 } /* anonymous namespace */
