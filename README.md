@@ -20,6 +20,11 @@ However, libhugetlbfs has several major drawbacks:
 
 Performance improves significantly for CPU-bound applications with big text/data sections (much more than 2 MB).  The technique was tested on MySQL server (https://github.com/mysql/mysql-server) in Cloud environment. The server consumes about 40-50 large pages (~100 MB). The CPU bound scenarious become faster up to 10% in sysbench OLTP PS/RO (especially for very small x86_64 cloud instances with 1 vCPU and 2 GB RAM). Speedup on AArch64 CPUs is usually much better, however it should be tested in each particular case.
 
+Analysis of iTLB and dTLB misses are excellently covered in the article [reference:1], so you might run this command before/after the remapping is done (Intel x86_64 processors):
+```shell
+$ perf stat -e cycles -e cpu/event=0x08,umask=0x10,name=dwalkcycles/ -e cpu/event=0x85,umask=0x10,name=iwalkcycles/ -e cpu/event=0x08,umask=0x01,name=dwalkmiss/ -e cpu/event=0x85,umask=0x01,name=iwalkmiss/ -e cpu/event=0xbc,umask=0x18,name=dloads/ -e cpu/event=0xbc,umask=0x28,name=iloads/ -p $app_pid sleep 30
+```
+
 # Implementation
 
 ElfRemapper does the following steps:
@@ -106,3 +111,7 @@ Many thanks to:
 * Sergey Glushchenko
 * Sergey Vojtovich
 * Georgy Kirichenko
+
+# References
+
+1. https://alexandrnikitin.github.io/blog/transparent-hugepages-measuring-the-performance-impact/
