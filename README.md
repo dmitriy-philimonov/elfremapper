@@ -1,10 +1,20 @@
+# Quick start
+
+Not recommended as a production solution, but it's a very fast way to benchmark if your application benefits from remapping your text and data sections to huge pages.
+
+```shell
+$ mkdir build && cd build && cmake .. -DMAKE_LD_PRELOAD_LIBRARY=1
+$ sudo bash -c "echo 100 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages"
+$ numactl -N0 env LD_PRELOAD=./libelfremapper.so ./your-application
+```
+
 # History
 
 The applications usually benefit from remapping .text and .data ELF sections to huge pages. The performance speedup comes from significant reduction of iTLB and dTLB misses. Of course, the approach isn't new. For example, well known implementations at the moment are:
-  * libhugetlbfs: https://github.com/libhugetlbfs/libhugetlbfs/blob/master/elflink.c ('remap_segments' function)
-  * Google: https://chromium.googlesource.com/chromium/src/+/refs/heads/master/chromeos/hugepage_text/... ('RemapHugetlbText*' functions)
-  * Facebook: https://github.com/facebook/hhvm/blob/master/hphp/runtime/base/program-functions.cpp ('HugifyText' function)
-  * Intel: https://github.com/intel/iodlr/blob/master/large_page-c/large_page.c ('MoveRegionToLargePages' function)
+  * [libhugetlbfs](https://github.com/libhugetlbfs/libhugetlbfs/blob/master/elflink.c): 'remap_segments' function
+  * [Google](https://chromium.googlesource.com/chromium/src/+/refs/heads/master/chromeos/hugepage_text/hugepage_text.cc): 'RemapHugetlbText*' functions
+  * [Facebook](https://github.com/facebook/hhvm/blob/master/hphp/runtime/base/program-functions.cpp): 'HugifyText' function
+  * [Intel](https://github.com/intel/iodlr/blob/master/large_page-c/large_page.c): 'MoveRegionToLargePages' function
 
 libhugetlbfs uses huge pages, meanwhile Google/Facebook/Intel rely on transparent huge pages. The approach which is used by libhugetlbfs looks better, since it has less dependency on the particular kernel allocation/defragmentation algorithm, so provides more persistent results.
 
@@ -115,3 +125,4 @@ Many thanks to:
 # References
 
 1. https://alexandrnikitin.github.io/blog/transparent-hugepages-measuring-the-performance-impact/
+2. https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt
