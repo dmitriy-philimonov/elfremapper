@@ -1,4 +1,5 @@
 # Quick start
+![cmake](https://github.com/dmitriy-philimonov/elfremapper/actions/workflows/cmake.yml/badge.svg?branch=main)
 
 Not recommended as a production solution, but it's a very fast way to benchmark if your application benefits from remapping your text and data sections to huge pages.
 
