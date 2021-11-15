@@ -68,6 +68,9 @@ Limitations:
 The library could be built in two ways:
 * With published API (default): a user must call the API manually from his application.
 * Without API (using cmake option `MAKE_LD_PRELOAD_LIBRARY`): as it stands, the functionality is called automatically during the library load, and the main usage is via `LD_PRELOAD` or an application may just link against the library and doesn't do anything else.
+* `WITH_LTO` option turns compiler's link time optimization on. LTO gives some performance boost, however, here the DSO code itself is cold, so turning LTO could be justified if:
+   * the DSO library is bundled into some bigger project which uses LTO,
+   * used for exposing some rare and devious errors
 
 The second option might be convenient for the testing/benchmarking purposes, e.g. you want to try the library with your application and you don't want to recompile it.
 

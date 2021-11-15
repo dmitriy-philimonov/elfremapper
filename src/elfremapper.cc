@@ -30,7 +30,7 @@ namespace {
 #define MAP_HUGE_2MB (21 << MAP_HUGE_SHIFT)
 #endif
 
-#define ATTRIBUTE(A) __attribute__((A))
+#define ATTRIBUTE(...) __attribute__((__VA_ARGS__))
 
 /* API: https://gcc.gnu.org/onlinedocs/gcc/Return-Address.html
 
@@ -650,8 +650,15 @@ size_t RemapMe(void (*logger)(const char *)) {
 #ifndef MAKE_LD_PRELOAD_LIBRARY
 
 extern "C" {
-size_t remap_v1(void (*logger)(const char *)) { return RemapMe(logger); }
-asm(".symver remap_v1,remap_text_and_data_to_huge_pages@@ELFREMAPPER_1.0");
+
+/* LTO + symver reliable support is added in GCC 10, workaround for older GCC */
+#if __GNUC__ >= 10
+  ATTRIBUTE(__symver__("remap_text_and_data_to_huge_pages@@ELFREMAPPER_1.0"))
+#else
+  asm(".symver remap_v1,remap_text_and_data_to_huge_pages@@ELFREMAPPER_1.0");
+  ATTRIBUTE(visibility("default"),externally_visible)
+#endif
+  size_t remap_v1(void (*logger)(const char *)) { return RemapMe(logger); }
 }
 
 #else

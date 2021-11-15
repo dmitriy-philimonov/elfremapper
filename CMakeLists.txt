@@ -11,6 +11,9 @@ IF(NOT EXISTS ${CMAKE_BINARY_DIR}/CMakeCache.txt)
   ENDIF()
 ENDIF()
 
+# Turn all warnings
+STRING(APPEND CMAKE_CXX_FLAGS " -Wall -Wextra -Werror")
+
 OPTION(MAKE_LD_PRELOAD_LIBRARY
   "Make remapping in DSO contructor, don't publish the interface"
   OFF
@@ -18,6 +21,16 @@ OPTION(MAKE_LD_PRELOAD_LIBRARY
 
 IF(MAKE_LD_PRELOAD_LIBRARY)
   STRING(APPEND CMAKE_CXX_FLAGS " -DMAKE_LD_PRELOAD_LIBRARY")
+ENDIF()
+
+OPTION(WITH_LTO
+  "Add LTO optimization"
+  ON
+)
+
+IF(WITH_LTO)
+  # TODO: check the compiler supports LTO
+  STRING(APPEND CMAKE_CXX_FLAGS " -flto")
 ENDIF()
 
 ADD_LIBRARY(elfremapper SHARED
