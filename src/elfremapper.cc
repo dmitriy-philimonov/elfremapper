@@ -1,10 +1,14 @@
 #include <alloca.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <vector>
@@ -59,14 +63,8 @@ public:
     va_start(args, format);
     int ret = vsnprintf(msg, sizeof(msg), format, args);
     va_end(args);
-    if (ret < 0)
-      return ret;
-
-    size_t size = static_cast<size_t>(ret);
-    if (size >= sizeof(msg)) {
-      msg[sizeof(msg) - 1] = '\0';
-    }
-    LoggerHook(msg);
+    if (ret > 0)
+      LoggerHook(msg);
     return ret;
   }
 };
@@ -97,117 +95,48 @@ static inline size_t AlignMeUp(size_t addr) {
   return (addr + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
 }
 
-struct TStringBuf {
-  void Split(TStringBuf *cols, size_t count) const {
-    size_t coll = 0;
-    char *line = Data, *const end = Data + Len;
-    for (char *start = line; start < end && coll < count; ++start) {
-      if (*start != ' ')
-        continue;
+static constexpr size_t EMPTY = (size_t)(-1);
 
-      TStringBuf &curr = cols[coll++];
-      curr.Len = start - line;
-      curr.Data = line;
-      while (++start < end && *start == ' ')
-        ;
-      line = start;
-    }
-    if (coll < count) {
-      TStringBuf &finalCol = cols[coll];
-      finalCol.Len = end - line;
-      finalCol.Data = line;
-    }
+struct TExeInode {
+  /* max uint64_t decimal is 20 digits + '\0' */
+  char Inode[21];
+  /* major and minor device ids are uint32_t, so
+     ist's maximum 8 + 8 hex digits + ':' + '\0'
+  */
+  char Device[18];
+  inline bool Equal(const char *inode, const char *device) const noexcept {
+    return strncmp(Inode, inode, sizeof(Inode)) == 0 &&
+           strncmp(Device, device, sizeof(Device)) == 0;
   }
-  bool operator==(const TStringBuf &rhs) const noexcept {
-    if (Len != rhs.Len)
+  inline bool GetSelfExeInode() noexcept {
+    union {
+      struct stat statBuf;
+      char charBuf[sizeof(struct stat)];
+    } u;
+    if (stat("/proc/self/exe", &u.statBuf) == -1) {
+      PRINT_ERROR_ERRNO("Can't stat /proc/self/exe");
       return false;
-    return memcmp(Data, rhs.Data, Len) == 0;
-  }
-
-  size_t Len;
-  char *Data;
-};
-
-class TFileReader {
-private:
-  FILE *Input;
-  size_t Len;
-  char *Line;
-
-public:
-  TFileReader(const char *fileName)
-      : Input(fopen(fileName, "r")), Len(128), Line(nullptr) {
-    if (Input == nullptr) {
-      PRINT_ERROR_ERRNO("TFileReader: fopen(%s,'r') failed", fileName);
-      destroy();
     }
-    if ((Line = (char *)malloc(Len)) == nullptr) {
-      PRINT_ERROR_ERRNO("TFileReader: malloc(%lu) failed", Len);
-      destroy();
+
+    /* Inode looks like 10-based int, Device look like "08:02" */
+    snprintf(Inode, sizeof(TExeInode::Inode), "%llu",
+             static_cast<unsigned long long>(u.statBuf.st_ino));
+    snprintf(Device, sizeof(TExeInode::Device), "%02x:%02x",
+             major(u.statBuf.st_dev), minor(u.statBuf.st_dev));
+#if VERBOSE_LEVEL >= 1
+    /* for debug purposes only, so the output is truncated at sizeof(u.charBuf),
+       which is 144UL
+    */
+    ssize_t ret = readlink("/proc/self/exe", u.charBuf, sizeof(u.charBuf));
+    if (ret > 0) {
+      size_t nbytes = static_cast<size_t>(ret);
+      u.charBuf[nbytes >= sizeof(u.charBuf) ? nbytes - 1 : nbytes] = '\0';
+      LOG_PRINTER(
+          "TExeInode: /proc/self/exe has inode='%s', device='%s', path='%s'",
+          Inode, Device, u.charBuf);
     }
-  }
-  void destroy() {
-    if (Line) {
-      free(Line);
-      Line = nullptr;
-    }
-    if (Input) {
-      fclose(Input);
-      Input = nullptr;
-    }
-  }
-
-  ~TFileReader() { destroy(); }
-
-  bool IsOk() const noexcept { return Input != nullptr; }
-
-  operator bool() const noexcept { return IsOk(); }
-
-  /* Returns null-terminated string with calculated length (without '\0') */
-  bool Read(TStringBuf &out) {
-    while (ssize_t read = getline(&Line, &Len, Input)) {
-      if (read == -1) {
-        destroy();
-        return false;
-      }
-      if (Line[read - 1] == '\n')
-        Line[--read] = '\0';
-
-      out.Len = read;
-      out.Data = Line;
-      return true;
-    }
-    return false;
-  }
-};
-
-class TLinkResolver {
-private:
-  size_t Len;
-  char *Data;
-
-public:
-  TLinkResolver() : Len(128), Data((char *)calloc(1, Len)) {}
-  ~TLinkResolver() { free(Data); }
-  bool Resolve(const char *path, TStringBuf &out) {
-    if (Data == nullptr)
-      return false;
-    ssize_t ret = 0;
-    while ((ret = readlink(path, Data, Len)) != -1) {
-      if ((size_t)ret < Len) {
-        out.Data = Data;
-        out.Len = strlen(Data);
-        return true;
-      }
-      Len <<= 1;
-      if ((Data = (char *)realloc(Data, Len)) == nullptr) {
-        PRINT_ERROR_ERRNO("TLinkResolver: realloc(%p,%lu) failed", Data, Len);
-        return false;
-      }
-      memset(Data, 0, Len);
-    }
-    PRINT_ERROR_ERRNO("TLinkResolver: readlink(%s) failed", path);
-    return false;
+#endif
+    return true;
   }
 };
 
@@ -225,7 +154,6 @@ struct TMapRegion {
 };
 
 class TRemapper {
-  static constexpr size_t EMPTY = (size_t)(-1);
 
 private:
   std::vector<TMapRegion> Regions;
@@ -235,19 +163,8 @@ private:
   size_t ExeLast = EMPTY;
 
 private:
-  bool ReadSelfMaps() noexcept {
-    /* Read return address of this function (or the one above).
-       Frankly, we don't care what address is returned, it only must
-       be from our DSO: we check that our code aren't linked in the
-       application statically.
-    */
-    size_t localPC = (size_t)GET_FUNCTION_RETURN_ADDRESS;
-
-    TLinkResolver resolver;
-    TStringBuf exe;
-    if (!resolver.Resolve("/proc/self/exe", exe))
-      return false;
-
+  bool inline ProcessLineSelfMaps(char *line, const size_t localPC,
+                                  const TExeInode &exeInode) noexcept {
     enum {
       START_STOP_ADDRESS = 0,
       PERMISSIONS = 1,
@@ -257,60 +174,105 @@ private:
       PATHNAME = 5,
       COUNT
     };
+    char *columns[COUNT];
 
-    TFileReader reader("/proc/self/maps");
-    TStringBuf line;
-    TStringBuf columns[COUNT] = {};
-    while (reader.Read(line)) {
-      line.Split(columns, COUNT);
+    size_t i = 0;
+    char *saveptr;
+    columns[i++] = strtok_r(line, " ", &saveptr);
+    while (i < COUNT && (columns[i] = strtok_r(nullptr, " ", &saveptr)))
+      ++i;
 
-      TMapRegion reg;
+    TMapRegion reg;
 
-      /* Address looks like "12345-67890 " */
-      TStringBuf &address = columns[START_STOP_ADDRESS];
-      char *next;
-      reg.AddressStart = strtoull(address.Data, &next, 16);
-      reg.AddressStop = strtoull(next + 1, NULL, 16);
-      reg.AddressStartAligned = AlignMeDown(reg.AddressStart);
-      reg.AddressStopAligned = AlignMeUp(reg.AddressStop);
+    /* Address looks like "12345-67890 " */
+    char *address = columns[START_STOP_ADDRESS];
+    char *next;
+    reg.AddressStart = strtoull(address, &next, 16);
+    reg.AddressStop = strtoull(next + 1, NULL, 16);
+    reg.AddressStartAligned = AlignMeDown(reg.AddressStart);
+    reg.AddressStopAligned = AlignMeUp(reg.AddressStop);
 
-      /* Permission flags field looks like "rwxp" */
-      TStringBuf &perm = columns[PERMISSIONS];
-      reg.Flags = 0;
-      if (perm.Data[0] == 'r')
-        reg.Flags |= PROT_READ;
-      if (perm.Data[1] == 'w')
-        reg.Flags |= PROT_WRITE;
-      if (perm.Data[2] == 'x')
-        reg.Flags |= PROT_EXEC;
+    /* Permission flags field looks like "rwxp" */
+    char *perm = columns[PERMISSIONS];
+    reg.Flags = 0;
+    if (perm[0] == 'r')
+      reg.Flags |= PROT_READ;
+    if (perm[1] == 'w')
+      reg.Flags |= PROT_WRITE;
+    if (perm[2] == 'x')
+      reg.Flags |= PROT_EXEC;
 
-      if ((reg.Flags & PROT_READ) == 0) {
-        DEBUG("Section without READ permission [%#lx, %#lx]: skipping",
-              reg.AddressStart, reg.AddressStop);
-        continue;
-      }
-
-      TStringBuf &pathname = columns[PATHNAME];
-      if (pathname == exe) {
-        DEBUG("Found load: [%#lx, %#lx) size: %#lx", reg.AddressStart, reg.AddressStop, reg.AddressStop - reg.AddressStart);
-        if (reg.AddressStartAligned <= localPC &&
-            localPC <= reg.AddressStopAligned) {
-          PRINT_ERROR(
-              "ElfRemapper source code overlaps with aligned LOAD segment: "
-              "%#lx inside [%#lx, %#lx). You MUST use ElfRemapper as DSO.",
-              localPC, reg.AddressStartAligned, reg.AddressStopAligned);
-          ExeLast = EMPTY;
-          return false;
-        }
-        if (ExeLast == EMPTY)
-          ExeFirst = ExeLast = Regions.size();
-        else
-          ExeLast = Regions.size();
-      }
-
-      Regions.push_back(reg);
+    if ((reg.Flags & PROT_READ) == 0) {
+      DEBUG("Section without READ permission [%#lx, %#lx]: skipping",
+            reg.AddressStart, reg.AddressStop);
+      return true;
     }
-    return ExeLast != EMPTY;
+
+    if (exeInode.Equal(columns[INODE], columns[DEVICE])) {
+      DEBUG("Found load: [%#lx, %#lx) size: %#lx", reg.AddressStart,
+            reg.AddressStop, reg.AddressStop - reg.AddressStart);
+      if (reg.AddressStartAligned <= localPC &&
+          localPC <= reg.AddressStopAligned) {
+        PRINT_ERROR(
+            "ElfRemapper source code overlaps with aligned LOAD segment: "
+            "%#lx inside [%#lx, %#lx). You MUST use ElfRemapper as DSO.",
+            localPC, reg.AddressStartAligned, reg.AddressStopAligned);
+        ExeLast = EMPTY;
+        return false;
+      }
+      if (ExeLast == EMPTY)
+        ExeFirst = ExeLast = Regions.size();
+      else
+        ExeLast = Regions.size();
+    }
+    Regions.push_back(reg);
+    return true;
+  }
+
+  bool ReadSelfMaps() noexcept {
+    /* Read return address of this function (or the one above).
+       Frankly, we don't care what address is returned, it only must
+       be from our DSO: we check that our code aren't linked in the
+       application statically.
+    */
+    size_t localPC = (size_t)GET_FUNCTION_RETURN_ADDRESS;
+
+    TExeInode exeInode;
+    if (!exeInode.GetSelfExeInode())
+      return false;
+
+    FILE *input = fopen("/proc/self/maps", "r");
+    if (input == nullptr) {
+      PRINT_ERROR_ERRNO("ReadSelfMaps: can't open /proc/self/maps");
+      return false;
+    }
+    size_t len = 128;
+    char *line = (char *)malloc(len);
+    if (line == nullptr) {
+      PRINT_ERROR_ERRNO("ReadSelfMaps: can't malloc(%lu)", len);
+      return false;
+    }
+    bool ok = true;
+    while (ssize_t read = getline(&line, &len, input)) {
+      if (read == -1) {
+        if (!feof(input)) {
+          PRINT_ERROR_ERRNO("ReadSelfMaps: getline(%p, %p, %p) failed", &line,
+                            &len, input);
+          ok = false;
+        }
+        break;
+      }
+      if (line[read - 1] == '\n')
+        line[--read] = '\0';
+
+      if (!ProcessLineSelfMaps(line, localPC, exeInode)) {
+        ok = false;
+        break;
+      }
+    }
+    free(line);
+    fclose(input);
+    return ok && (ExeLast != EMPTY);
   }
 
   void FindHeap() {
@@ -346,12 +308,14 @@ private:
 public:
   TRemapper() {
     if (!ReadSelfMaps()) {
-      DEBUG("Loaded %lu sections, no sections for remapping found", Regions.size());
+      DEBUG("Loaded %lu sections, no sections for remapping found",
+            Regions.size());
       return;
     }
 
     FindHeap();
-    DEBUG("Loaded %lu sections, remapping %lu", Regions.size(), ExeLast - ExeFirst + 1);
+    DEBUG("Loaded %lu sections, remapping %lu", Regions.size(),
+          ExeLast - ExeFirst + 1);
   }
 
   operator bool() const noexcept { return ExeLast != EMPTY; }
@@ -429,6 +393,18 @@ public:
       }
     }
 
+    auto remapBack = [&info](size_t i) {
+      while (i--) {
+        const TRegionInfo &r = info[i];
+        if (mremap(r.RemapAddr, r.RemapSize, r.RemapSize,
+                   MREMAP_MAYMOVE | MREMAP_FIXED, r.RealAddr) == MAP_FAILED) {
+          /* this should never happen, if we have this - everything is very,
+           * very bad */
+          exit(13);
+        }
+      }
+    };
+
     /* Dangerous part of code (the dark deep abyss - wormwhole):
        - the code below must be run as DSO part
          (overwise you'll get SIGSEGV after mremap)
@@ -456,15 +432,7 @@ public:
         /* anonymous mappings < i are already remapped, >= i are not */
         size_t currI = i;
         /* move back everything what we've managed to mremap away */
-        while (i--) {
-          const TRegionInfo &r = info[i];
-          if (mremap(r.RemapAddr, r.RemapSize, r.RemapSize,
-                     MREMAP_MAYMOVE | MREMAP_FIXED, r.RealAddr) == MAP_FAILED) {
-            /* this should never happen, if we have this - everything is very,
-             * very bad */
-            exit(13);
-          }
-        }
+        remapBack(currI);
         /* unmap regions which are still anonymously mapped */
         for (i = currI; i < infoSize; ++i) {
           const TRegionInfo &r = info[i];
@@ -506,16 +474,7 @@ public:
       /* can't print error */
       err = errno;
       /* move everything back */
-      size_t i = infoSize;
-      while (i--) {
-        const TRegionInfo &r = info[i];
-        if (mremap(r.RemapAddr, r.RemapSize, r.RemapSize,
-                   MREMAP_MAYMOVE | MREMAP_FIXED, r.RealAddr) == MAP_FAILED) {
-          /* this should never happen, if we have this - everything is very,
-           * very bad */
-          exit(13);
-        }
-      }
+      remapBack(infoSize);
       /* restore heap break back */
       if (heapEnd) {
         if (brk((void *)heapEnd) == -1) {
@@ -575,12 +534,12 @@ public:
        so it should not happen.
     */
     if (ExeFirst != 0 && Regions[ExeFirst - 1].AddressStopAligned >
-                          Regions[ExeFirst].AddressStartAligned) {
-      PRINT_ERROR("First LOAD segments overlaps with previous mapping "
-                  "prev=[0x%lx, 0x%lx), first=[0x%lx, 0x%lx)",
-                  Regions[ExeFirst - 1].AddressStart,
-                  Regions[ExeFirst - 1].AddressStop, Regions[ExeFirst].AddressStart,
-                  Regions[ExeFirst].AddressStop);
+                             Regions[ExeFirst].AddressStartAligned) {
+      PRINT_ERROR(
+          "First LOAD segments overlaps with previous mapping "
+          "prev=[0x%lx, 0x%lx), first=[0x%lx, 0x%lx)",
+          Regions[ExeFirst - 1].AddressStart, Regions[ExeFirst - 1].AddressStop,
+          Regions[ExeFirst].AddressStart, Regions[ExeFirst].AddressStop);
       return 0;
     }
 
@@ -626,11 +585,15 @@ public:
 
 void PrintSelfMaps() {
 #if VERBOSE_LEVEL >= 2
-	TFileReader reader("/proc/self/maps");
-	TStringBuf line;
-	while(reader.Read(line)) {
-		fprintf(stderr, "%s\n", line.Data);
-	}
+  /* for debug purposes only, so no proper error handling is provided */
+  int fd = open("/proc/self/maps", O_RDONLY);
+  if (fd == -1)
+    return;
+  char buf[128];
+  while (ssize_t bytes = read(fd, buf, sizeof(buf))) {
+    ssize_t ret ATTRIBUTE(unused) = write(STDOUT_FILENO, buf, bytes);
+  }
+  close(fd);
 #endif
 }
 
@@ -653,12 +616,12 @@ extern "C" {
 
 /* LTO + symver reliable support is added in GCC 10, workaround for older GCC */
 #if __GNUC__ >= 10
-  ATTRIBUTE(__symver__("remap_text_and_data_to_huge_pages@@ELFREMAPPER_1.0"))
+ATTRIBUTE(__symver__("remap_text_and_data_to_huge_pages@@ELFREMAPPER_1.0"))
 #else
-  asm(".symver remap_v1,remap_text_and_data_to_huge_pages@@ELFREMAPPER_1.0");
-  ATTRIBUTE(visibility("default"),externally_visible)
+asm(".symver remap_v1,remap_text_and_data_to_huge_pages@@ELFREMAPPER_1.0");
+ATTRIBUTE(visibility("default"), externally_visible)
 #endif
-  size_t remap_v1(void (*logger)(const char *)) { return RemapMe(logger); }
+size_t remap_v1(void (*logger)(const char *)) { return RemapMe(logger); }
 }
 
 #else
