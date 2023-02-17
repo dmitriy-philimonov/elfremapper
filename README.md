@@ -4,7 +4,7 @@
 Not recommended as a production solution, but it's a very fast way to benchmark if your application benefits from remapping your text and data sections to huge pages.
 
 ```shell
-$ mkdir build && cd build && cmake .. -DMAKE_LD_PRELOAD_LIBRARY=1
+$ mkdir build && cd build && cmake .. -DMAKE_LD_PRELOAD_LIBRARY=1 && make
 $ sudo bash -c "echo 100 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages"
 $ numactl -N0 env LD_PRELOAD=./libelfremapper.so ./your-application
 ```
